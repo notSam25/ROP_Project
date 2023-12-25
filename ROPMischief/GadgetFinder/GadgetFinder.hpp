@@ -9,8 +9,8 @@
 
 #define RETURN_OPCODE 0xC3
 #define CALL_OPCODE 0xFF
+#define MACHINE_CODE_64_BIT 0x8664
 
-// Only supports x64 bit
 class GadgetFinder {
 public:
 	struct GadgetFilter {
@@ -25,7 +25,7 @@ public:
 	};
 
 	struct Gadget {
-		std::uint64_t rva; // TODO: This isn't implemented correctly
+		std::uint64_t rva;
 		std::vector<std::uint8_t> data;
 	};
 
@@ -35,14 +35,15 @@ public:
 	};
 public:
 	GadgetFinder(GadgetFinderCreateInfo* create_info);
-	~GadgetFinder();
 
-	GadgetInfo* AqquireGadgetInfo();
+	std::unique_ptr<GadgetInfo> AqquireGadgetInfo();
 private:
 	struct SectionHeaderEntry {
 		IMAGE_SECTION_HEADER header;
 		std::vector<std::uint8_t> data;
 	};
+
+	bool GadgetPassesFilter(Gadget gadget, GadgetFilter filter);
 
 	GadgetFinderCreateInfo* m_CreateInfo = nullptr;
 	SectionHeaderEntry m_SectionEntry;

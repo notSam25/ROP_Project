@@ -13,8 +13,9 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 
 	createInfo.pGadgetFilter = &createInfoGadgetFilter;
 	
+	// suggestion: make all pointers smart
 	GadgetFinder* gadgetFinder = new GadgetFinder(&createInfo);
-	GadgetFinder::GadgetInfo* pGadgetInfo = gadgetFinder->AqquireGadgetInfo();
+	std::unique_ptr<GadgetFinder::GadgetInfo> pGadgetInfo = gadgetFinder->AqquireGadgetInfo();
 	
 	printf("Found %zd gadgets\nFound %zd filtered gadgets\n",
 		pGadgetInfo->unfilteredGadgets.size(),
@@ -23,4 +24,3 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 	delete gadgetFinder;
 	return EXIT_SUCCESS;
 }
-// CFI indirect call checks

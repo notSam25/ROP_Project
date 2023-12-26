@@ -29,7 +29,7 @@ public:
 		size_t maxLookbackLength;
 		size_t maxNumOfGadgets;
 		bool excludeIndirectCalls;
-		const std::vector<std::vector<std::uint8_t>> otherExcludeInstructions;
+		const std::vector<std::vector<x86_insn>> otherExcludeInstructions;
 	};
 
 	struct GadgetFinderCreateInfo {
@@ -58,8 +58,7 @@ private:
 	};
 
 	bool GadgetPassesFilter(Gadget gadget, GadgetFilter filter);
-	std::pair<cs_insn*, size_t> DissasembleBytes(csh capstone_handle, std::vector<uint8_t> bytes, uint64_t rva);
-
+	std::vector<cs_insn> DissasembleBytes(csh capstone_handle, std::vector<uint8_t> bytes, uint64_t rva);
 	GadgetFinderCreateInfo* m_CreateInfo = nullptr;
 	SectionHeaderEntry m_SectionEntry;
 };

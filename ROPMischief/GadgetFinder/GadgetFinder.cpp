@@ -91,25 +91,36 @@ GadgetFinder::GadgetFinder(GadgetFinderCreateInfo* create_info) : m_CreateInfo(c
     file.close();
 }
 
-std::pair<cs_insn*, size_t> GadgetFinder::DissasembleBytes(csh capstone_handle, std::vector<uint8_t> bytes, uint64_t rva) {
-    cs_insn* result = nullptr;
+std::vector<cs_insn> GadgetFinder::DissasembleBytes(csh capstone_handle, std::vector<uint8_t> bytes, uint64_t rva) {
+    std::vector<cs_insn> result;
+    cs_insn* buff;
+    size_t count = 0;
 
+    // check for valid bytes to dissect
     if (bytes.empty()) {
         if (ANNOUNCE_FAILURE_MESSAGES) {
             printf("[FAIL] cannot disassemble invalid byte array\n");
         }
-        return { nullptr, 0 };
+        return { };
     }
 
-    size_t count = cs_disasm(capstone_handle, bytes.data(), bytes.size(), rva, 0, &result);
+    // dissasemble instructions into buff
+    count = cs_disasm(capstone_handle, bytes.data(), bytes.size(), rva, 0, &buff);
     if (count == 0) {
         if (ANNOUNCE_FAILURE_MESSAGES) {
             printf("[FAIL] failed to disassemble bytes\n");
         }
-        return { nullptr, 0 };
+        return { };
     }
 
-    return { result, count };
+    // put buff into result
+    for (size_t idx = 0; idx < count; idx++) {
+        result.push_back(buff[idx]);
+    }
+
+    // cleanup & return
+    cs_free(buff, count);
+    return result;
 }
 
 std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AcquireGadgetInfo() {
@@ -140,8 +151,17 @@ std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AcquireGadgetInfo() {
         throw std::runtime_error("failed to initialize Capstone engine");
     }
 
-    // don't get any data we don't need
-    cs_option(capstoneEngineHandle, CS_OPT_SKIPDATA, CS_OPT_ON);
+    // don't skip out on instruction data
+    if (cs_option(capstoneEngineHandle, CS_OPT_SKIPDATA, CS_OPT_OFF) != CS_ERR_OK) {
+        cs_close(&capstoneEngineHandle);
+        throw std::runtime_error("failed to initialize Capstone engine(1)");
+    }
+    
+    // get details for instrucitons
+    if (cs_option(capstoneEngineHandle, CS_OPT_DETAIL, CS_OPT_ON) != CS_ERR_OK) {
+        cs_close(&capstoneEngineHandle);
+        throw std::runtime_error("failed to initialize Capstone engine(1)");
+    }
 
     // iterate over all bytes in the text section
     for (size_t idx = 0; idx < this->m_SectionEntry.data.size(); ++idx) {
@@ -159,39 +179,31 @@ std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AcquireGadgetInfo() {
                 auto bytesToDissasemble = std::vector<uint8_t>(m_SectionEntry.data.begin() + idxStart,
                     m_SectionEntry.data.begin() + idx + 1);
 
-                std::pair<cs_insn*, size_t> dissassembledBytes = DissasembleBytes(
+                std::vector<cs_insn> dissassembledBytes = DissasembleBytes(
                     capstoneEngineHandle,
                     bytesToDissasemble,
                     this->m_SectionEntry.header.VirtualAddress + idxStart);
 
-                if (dissassembledBytes.first == nullptr || dissassembledBytes.second <= this->m_CreateInfo->pGadgetFilter->gadgetLength) {
+                if (dissassembledBytes.size() == 0|| dissassembledBytes.size() <= this->m_CreateInfo->pGadgetFilter->gadgetLength) {
                     lookbackLength++;
                     continue;
                 }
 
-                if (dissassembledBytes.first[dissassembledBytes.second - 1].id != x86_insn::X86_INS_RET) {
+                if (dissassembledBytes.at(dissassembledBytes.size() - 1).id != x86_insn::X86_INS_RET) {
                     break;
                 }
                 
-                std::vector<cs_insn> instructions;
-                for (size_t j = dissassembledBytes.second - this->m_CreateInfo->pGadgetFilter->gadgetLength;
-                    j < dissassembledBytes.second; j++) {
-                    instructions.push_back(dissassembledBytes.first[j]);
-                }
-
                 Gadget unfilteredGadget = {
                     .rva = this->m_SectionEntry.header.VirtualAddress + idxStart,
                      .data = bytesToDissasemble,
-                     .instructions = instructions
+                     .instructions = dissassembledBytes
                 };
 
-                // TODO: remake filter to utalize cs_insn
                 if (GadgetPassesFilter(unfilteredGadget, *this->m_CreateInfo->pGadgetFilter)) {
                     result->filteredGadgets.push_back(unfilteredGadget);
                 }
 
                 result->unfilteredGadgets.push_back(unfilteredGadget);
-                cs_free(dissassembledBytes.first, dissassembledBytes.second);
                 break;
             }
         }
@@ -201,7 +213,68 @@ std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AcquireGadgetInfo() {
     return result;
 }
 
-bool GadgetFinder::GadgetPassesFilter(Gadget gadget, GadgetFilter filter) {
-    // TODO: implementation
+bool GadgetFinder::GadgetPassesFilter(Gadget gadget, GadgetFilter gadgetFilter) {
+
+    if (gadgetFilter.excludeIndirectCalls) {
+        for (const auto& insn : gadget.instructions) {
+            if (insn.id == X86_INS_CALL) {
+                cs_x86 detail = insn.detail->x86;
+                if (detail.op_count == 0) {
+                    continue;
+                }
+
+                // check if it's an indirect call with register indirection
+                if (detail.operands[0].type == X86_OP_REG) {
+                    return false;
+                }
+
+                // check if it's an indirect call with immediate value
+                if (detail.operands[0].type == X86_OP_IMM) {
+                    return false;
+                }
+
+                // check if it's an indirect call with memory operand
+                if (detail.operands[0].type == X86_OP_MEM) {
+                    return false;
+                }
+
+                // check if it's an indirect call with relative addressing
+                if (detail.operands[0].type == X86_OP_MEM &&
+                    detail.operands[0].mem.base == X86_REG_RIP) {
+                    return false;
+                }
+
+                // check if it's an indirect call with multiple operands
+                if (detail.op_count > 1) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    
+    for (const cs_insn& insn : gadget.instructions) {
+        x86_insn insnID = static_cast<x86_insn>(insn.id);
+
+        for (const std::vector<x86_insn>& filter : gadgetFilter.otherExcludeInstructions) {
+            size_t filterIdx = 0; // index to track the progress in the filter sequence
+
+            // iterate over the instructions in the gadget
+            for (const cs_insn& gadgetInsn : gadget.instructions) {
+                x86_insn gadgetInsnID = static_cast<x86_insn>(gadgetInsn.id);
+
+                // if the current gadget instruction matches the current filter instruction
+                if (gadgetInsnID == filter[filterIdx]) {
+                    filterIdx++;
+
+                    // if the entire filter sequence is matched, return false
+                    if (filterIdx == filter.size()) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
     return true;
 }

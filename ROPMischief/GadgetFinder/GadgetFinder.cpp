@@ -112,7 +112,7 @@ std::pair<cs_insn*, size_t> GadgetFinder::DissasembleBytes(csh capstone_handle, 
     return { result, count };
 }
 
-std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AqquireGadgetInfo() {
+std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AcquireGadgetInfo() {
     std::unique_ptr<GadgetInfo> result = std::make_unique<GadgetInfo>();
 
     // check for valid instruction array
@@ -125,9 +125,18 @@ std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AqquireGadgetInfo() {
         throw std::runtime_error("gadget length cannot be zero or less");
     }
 
+    if (this->m_CreateInfo->pGadgetFilter->maxNumOfGadgets < 0) {
+        throw std::runtime_error("gadgets size cannot be less than zero");
+    }
+
+    if (this->m_CreateInfo->pGadgetFilter->maxLookbackLength < 0) {
+        throw std::runtime_error("gadgets lookback length cannot be less than zero");
+    }
+
     // establish a handle to the capstone dissasembly engine
     csh capstoneEngineHandle;
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &capstoneEngineHandle) != CS_ERR_OK) {
+        cs_close(&capstoneEngineHandle);
         throw std::runtime_error("failed to initialize Capstone engine");
     }
 
@@ -193,38 +202,6 @@ std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AqquireGadgetInfo() {
 }
 
 bool GadgetFinder::GadgetPassesFilter(Gadget gadget, GadgetFilter filter) {
-
-    if (filter.excludeIndirectCalls == true) {
-        for (size_t idx = 0; idx < gadget.data.size(); ++idx) {
-            std::uint8_t opcode = gadget.data.at(idx);
-            if (opcode == CALL_OPCODE) {
-
-                // invalid call detected
-                if (idx + 1 >= gadget.data.size() - 1) {
-                    return false;
-                }
-
-                // if the next opcode is a register, that means the gadget
-                // contains an indirect call
-                if (gadget.data.at(idx + 1) >= 208 && gadget.data.at(idx + 1) <= 215) {
-                    return false;
-                }
-            }
-        }
-    }
-
-    // iterate over all opcodes that the user wants to exclude
-    for (std::vector<std::uint8_t> exclude : filter.otherExcludeInstructions) {
-
-        // check for invalid filter instruction size
-        if (exclude.size() > filter.gadgetLength) {
-            throw std::runtime_error("bad filter length");
-        }
-
-        // return if the gadget has none of the 'exclude' instructions in it
-        return (std::search(gadget.data.begin(), gadget.data.end(),
-            exclude.begin(), exclude.end()) != gadget.data.end());
-    }
-
+    // TODO: implementation
     return true;
 }

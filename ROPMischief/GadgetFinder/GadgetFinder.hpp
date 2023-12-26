@@ -1,17 +1,14 @@
 #pragma once
-
 #include <capstone/capstone.h>
 
 #include <Windows.h>
-#include <string>
-#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <vector>
 
-#define RETURN_OPCODE 0xC3
-#define CALL_OPCODE 0xFF
-#define MACHINE_CODE_64_BIT 0x8664
+constexpr std::uint8_t RETURN_OPCODE = 0xC3;
+constexpr std::uint8_t CALL_OPCODE = 0xFF;
+constexpr std::uint32_t MACHINE_CODE_64_BIT = 0x8664;
 #ifndef ANNOUNCE_FAILURE_MESSAGES
 #define ANNOUNCE_FAILURE_MESSAGES false
 #endif // !ANNOUNCE_FAILURE_MESSAGES
@@ -32,7 +29,7 @@ public:
 		size_t maxLookbackLength;
 		size_t maxNumOfGadgets;
 		bool excludeIndirectCalls;
-		std::vector<std::vector<std::uint8_t>> otherExcludeInstructions;
+		const std::vector<std::vector<std::uint8_t>> otherExcludeInstructions;
 	};
 
 	struct GadgetFinderCreateInfo {
@@ -53,7 +50,7 @@ public:
 public:
 	GadgetFinder(GadgetFinderCreateInfo* create_info);
 
-	std::unique_ptr<GadgetInfo> AqquireGadgetInfo();
+	std::unique_ptr<GadgetInfo> AcquireGadgetInfo();
 private:
 	struct SectionHeaderEntry {
 		IMAGE_SECTION_HEADER header;
@@ -62,6 +59,7 @@ private:
 
 	bool GadgetPassesFilter(Gadget gadget, GadgetFilter filter);
 	std::pair<cs_insn*, size_t> DissasembleBytes(csh capstone_handle, std::vector<uint8_t> bytes, uint64_t rva);
+
 	GadgetFinderCreateInfo* m_CreateInfo = nullptr;
 	SectionHeaderEntry m_SectionEntry;
 };

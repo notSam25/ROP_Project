@@ -18,11 +18,11 @@ public:
 
 	/**
 	* A filter for locating gadgets
-	* @param gadgetLength: the length of instructions a gadget should have, including the 'ret'
-	* @param maxLookbackLength: the length in bytes to find a gadget of gadgetLength
-	* @param maxNumOfGadgets: the max number of gadgets to find, or zero if you want to find all of them
-	* @param excludeIndirectCalls: a boolean value to exclude gadgets that use registers to return
-	* @param otherExcludeInstructions: a vector of instructions to exclude if gadgets contain them
+	* gadgetLength: the length of instructions a gadget should have, including the 'ret'
+	* maxLookbackLength: the length in bytes to find a gadget of gadgetLength
+	* maxNumOfGadgets: the max number of gadgets to find, or zero if you want to find all of them
+	* excludeIndirectCalls: a boolean value to exclude gadgets that use registers to return
+	* otherExcludeInstructions: a vector of instructions to exclude if gadgets contain them
 	*/
 	struct GadgetFilter {
 		size_t gadgetLength;
@@ -38,6 +38,14 @@ public:
 		GadgetFilter* pGadgetFilter;
 	};
 
+	/**
+	* A container for Gadget data
+	* rva: the virtual address of the bytes. Note that the byte 
+			rva isn't the same as the first instruction rva always.
+	* data: the vector of bytes
+	* instructions: the instructions of the gadget. 
+					Note that the instructions are not all of the instructions of the byte array due to the gadget filter
+	*/
 	struct Gadget {
 		std::uint64_t rva;
 		std::vector<std::uint8_t> data;

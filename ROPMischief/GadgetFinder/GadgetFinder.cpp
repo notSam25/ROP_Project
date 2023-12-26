@@ -19,7 +19,9 @@ GadgetFinder::GadgetFinder(GadgetFinderCreateInfo* create_info) : m_CreateInfo(c
     
     // put the binary info of the file into a var
     std::ifstream file(create_info->executablePath, std::ios::binary);
-
+   
+    printf("[INFO] Loading %s\n", std::filesystem::path(create_info->executablePath).filename().string().c_str());
+    
     // check if we can open the file
     if (!file.is_open()) {
         throw std::runtime_error("error opening file");
@@ -28,6 +30,8 @@ GadgetFinder::GadgetFinder(GadgetFinderCreateInfo* create_info) : m_CreateInfo(c
     // read the DOS header of the file
     IMAGE_DOS_HEADER dosHeader{};
     file.read(reinterpret_cast<char*>(&dosHeader), sizeof(IMAGE_DOS_HEADER));
+
+    printf("[INFO] Reading file's DOS header\n");
 
     // check for MZ
     if (dosHeader.e_magic != IMAGE_DOS_SIGNATURE) {
@@ -40,7 +44,9 @@ GadgetFinder::GadgetFinder(GadgetFinderCreateInfo* create_info) : m_CreateInfo(c
     // read the NT headers
     IMAGE_NT_HEADERS ntHeaders{};
     file.read(reinterpret_cast<char*>(&ntHeaders), sizeof(IMAGE_NT_HEADERS));
-    
+
+    printf("[INFO] Reading file's NT headers\n");
+
     // compare signature
     if (ntHeaders.Signature != IMAGE_NT_SIGNATURE) {
         throw std::runtime_error("invalid PE file");
@@ -50,11 +56,15 @@ GadgetFinder::GadgetFinder(GadgetFinderCreateInfo* create_info) : m_CreateInfo(c
         throw std::runtime_error("this program does not support 32bit");
     }
 
+    printf("[INFO] Locating .TEXT section\n");
+
     for (size_t i = 0; i < ntHeaders.FileHeader.NumberOfSections; i++) {
         IMAGE_SECTION_HEADER sectionHeader{};
         file.read(reinterpret_cast<char*>(&sectionHeader), sizeof(IMAGE_SECTION_HEADER));
 
         if (_strcmpi(".text", reinterpret_cast<char*>(sectionHeader.Name)) == 0) {
+            printf("[INFO] Found .TEXT section at [%x]\n", sectionHeader.VirtualAddress);
+
             auto sectionHeaderEntry = SectionHeaderEntry{
                     .header = sectionHeader,
                     .data = std::vector<std::uint8_t>(sectionHeader.Misc.VirtualSize) 
@@ -81,44 +91,39 @@ GadgetFinder::GadgetFinder(GadgetFinderCreateInfo* create_info) : m_CreateInfo(c
     file.close();
 }
 
-bool GadgetFinder::GadgetPassesFilter(Gadget gadget, GadgetFilter filter) {
+std::vector<cs_insn> GadgetFinder::DissasembleBytes(csh capstone_handle, std::vector<uint8_t> bytes, uint64_t rva) {
+    std::vector<cs_insn> result;
+    cs_insn* buff;
+    size_t count = 0;
 
-    if (filter.excludeIndirectCalls == true) {
-        for (size_t idx = 0; idx < gadget.data.size(); ++idx) {
-            std::uint8_t opcode = gadget.data.at(idx);
-            if (opcode == CALL_OPCODE) {
-
-                // invalid call detected
-                if (idx + 1 >= gadget.data.size() - 1) {
-                    return false;
-                }
-
-                // if the next opcode is a register, that means the gadget
-                // contains an indirect call
-                if (gadget.data.at(idx + 1) >= 208 && gadget.data.at(idx + 1) <= 215) {
-                    return false;
-                }
-            }
+    // check for valid bytes to dissect
+    if (bytes.empty()) {
+        if (ANNOUNCE_FAILURE_MESSAGES) {
+            printf("[FAIL] cannot disassemble invalid byte array\n");
         }
+        return { };
     }
 
-    // iterate over all opcodes that the user wants to exclude
-    for (std::vector<std::uint8_t> exclude : filter.otherExcludeInstructions) {
-
-        // check for invalid filter instruction size
-        if (exclude.size() > filter.gadgetLength) {
-            throw std::runtime_error("bad filter length");
+    // dissasemble instructions into buff
+    count = cs_disasm(capstone_handle, bytes.data(), bytes.size(), rva, 0, &buff);
+    if (count == 0) {
+        if (ANNOUNCE_FAILURE_MESSAGES) {
+            printf("[FAIL] failed to disassemble bytes\n");
         }
-
-        // return if the gadget has none of the 'exclude' instructions in it
-        return (std::search(gadget.data.begin(), gadget.data.end(),
-            exclude.begin(), exclude.end()) != gadget.data.end());
+        return { };
     }
 
-    return true;
+    // put buff into result
+    for (size_t idx = 0; idx < count; idx++) {
+        result.push_back(buff[idx]);
+    }
+
+    // cleanup & return
+    cs_free(buff, count);
+    return result;
 }
 
-std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AqquireGadgetInfo() {
+std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AcquireGadgetInfo() {
     std::unique_ptr<GadgetInfo> result = std::make_unique<GadgetInfo>();
 
     // check for valid instruction array
@@ -131,31 +136,145 @@ std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AqquireGadgetInfo() {
         throw std::runtime_error("gadget length cannot be zero or less");
     }
 
-    // get all end indexs for return opcodes
-    std::vector<std::uint64_t> vIdxRetOpcode;
-    for (size_t idx = 0; idx < this->m_SectionEntry.data.size(); ++idx) {
-        if (this->m_SectionEntry.data.at(idx) == RETURN_OPCODE) {
-            vIdxRetOpcode.push_back(idx);
-        }
+    if (this->m_CreateInfo->pGadgetFilter->maxNumOfGadgets < 0) {
+        throw std::runtime_error("gadgets size cannot be less than zero");
+    }
+
+    if (this->m_CreateInfo->pGadgetFilter->maxLookbackLength < 0) {
+        throw std::runtime_error("gadgets lookback length cannot be less than zero");
+    }
+
+    // establish a handle to the capstone dissasembly engine
+    csh capstoneEngineHandle;
+    if (cs_open(CS_ARCH_X86, CS_MODE_64, &capstoneEngineHandle) != CS_ERR_OK) {
+        cs_close(&capstoneEngineHandle);
+        throw std::runtime_error("failed to initialize Capstone engine");
+    }
+
+    // don't skip out on instruction data
+    if (cs_option(capstoneEngineHandle, CS_OPT_SKIPDATA, CS_OPT_OFF) != CS_ERR_OK) {
+        cs_close(&capstoneEngineHandle);
+        throw std::runtime_error("failed to initialize Capstone engine(1)");
     }
     
-    // iterate and add gadgets to result
-    for (size_t idx : vIdxRetOpcode) {
-        size_t startIdx = idx - this->m_CreateInfo->pGadgetFilter->gadgetLength + 1;
-
-        Gadget unfilteredGadget = {
-            .rva = this->m_SectionEntry.header.VirtualAddress + startIdx,
-            .data = std::vector<std::uint8_t>(
-                this->m_SectionEntry.data.begin() + startIdx,
-                this->m_SectionEntry.data.begin() + idx + 1)
-        };
-
-        if (GadgetPassesFilter(unfilteredGadget, *this->m_CreateInfo->pGadgetFilter)) {
-            result->filteredGadgets.push_back(unfilteredGadget);
-        }
-        
-        result->unfilteredGadgets.push_back(unfilteredGadget);
+    // get details for instrucitons
+    if (cs_option(capstoneEngineHandle, CS_OPT_DETAIL, CS_OPT_ON) != CS_ERR_OK) {
+        cs_close(&capstoneEngineHandle);
+        throw std::runtime_error("failed to initialize Capstone engine(1)");
     }
 
+    // iterate over all bytes in the text section
+    for (size_t idx = 0; idx < this->m_SectionEntry.data.size(); ++idx) {
+
+        // identify return opcodes
+        if (this->m_SectionEntry.data.at(idx) == RETURN_OPCODE 
+            && (this->m_CreateInfo->pGadgetFilter->maxNumOfGadgets == 0 
+            || (this->m_CreateInfo->pGadgetFilter->maxNumOfGadgets > 0
+            && result->unfilteredGadgets.size() < this->m_CreateInfo->pGadgetFilter->maxNumOfGadgets))) {
+
+            // establish a lookback length in bytes
+            size_t lookbackLength = 0;
+            while (lookbackLength <= this->m_CreateInfo->pGadgetFilter->maxLookbackLength) {
+                size_t idxStart = idx - lookbackLength;
+                auto bytesToDissasemble = std::vector<uint8_t>(m_SectionEntry.data.begin() + idxStart,
+                    m_SectionEntry.data.begin() + idx + 1);
+
+                std::vector<cs_insn> dissassembledBytes = DissasembleBytes(
+                    capstoneEngineHandle,
+                    bytesToDissasemble,
+                    this->m_SectionEntry.header.VirtualAddress + idxStart);
+
+                if (dissassembledBytes.size() == 0|| dissassembledBytes.size() <= this->m_CreateInfo->pGadgetFilter->gadgetLength) {
+                    lookbackLength++;
+                    continue;
+                }
+
+                if (dissassembledBytes.at(dissassembledBytes.size() - 1).id != x86_insn::X86_INS_RET) {
+                    break;
+                }
+                
+                Gadget unfilteredGadget = {
+                    .rva = this->m_SectionEntry.header.VirtualAddress + idxStart,
+                     .data = bytesToDissasemble,
+                     .instructions = dissassembledBytes
+                };
+
+                if (GadgetPassesFilter(unfilteredGadget, *this->m_CreateInfo->pGadgetFilter)) {
+                    result->filteredGadgets.push_back(unfilteredGadget);
+                }
+
+                result->unfilteredGadgets.push_back(unfilteredGadget);
+                break;
+            }
+        }
+    }
+
+    cs_close(&capstoneEngineHandle);
     return result;
+}
+
+bool GadgetFinder::GadgetPassesFilter(Gadget gadget, GadgetFilter gadgetFilter) {
+
+    if (gadgetFilter.excludeIndirectCalls) {
+        for (const auto& insn : gadget.instructions) {
+            if (insn.id == X86_INS_CALL) {
+                cs_x86 detail = insn.detail->x86;
+                if (detail.op_count == 0) {
+                    continue;
+                }
+
+                // check if it's an indirect call with register indirection
+                if (detail.operands[0].type == X86_OP_REG) {
+                    return false;
+                }
+
+                // check if it's an indirect call with immediate value
+                if (detail.operands[0].type == X86_OP_IMM) {
+                    return false;
+                }
+
+                // check if it's an indirect call with memory operand
+                if (detail.operands[0].type == X86_OP_MEM) {
+                    return false;
+                }
+
+                // check if it's an indirect call with relative addressing
+                if (detail.operands[0].type == X86_OP_MEM &&
+                    detail.operands[0].mem.base == X86_REG_RIP) {
+                    return false;
+                }
+
+                // check if it's an indirect call with multiple operands
+                if (detail.op_count > 1) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    
+    for (const cs_insn& insn : gadget.instructions) {
+        x86_insn insnID = static_cast<x86_insn>(insn.id);
+
+        for (const std::vector<x86_insn>& filter : gadgetFilter.otherExcludeInstructions) {
+            size_t filterIdx = 0; // index to track the progress in the filter sequence
+
+            // iterate over the instructions in the gadget
+            for (const cs_insn& gadgetInsn : gadget.instructions) {
+                x86_insn gadgetInsnID = static_cast<x86_insn>(gadgetInsn.id);
+
+                // if the current gadget instruction matches the current filter instruction
+                if (gadgetInsnID == filter[filterIdx]) {
+                    filterIdx++;
+
+                    // if the entire filter sequence is matched, return false
+                    if (filterIdx == filter.size()) {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+
+    return true;
 }

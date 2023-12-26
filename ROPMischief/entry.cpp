@@ -13,6 +13,7 @@ int main([[maybe_unused]] int argc, [[maybe_unused]] char** argv) {
 	
 	GadgetFinder::GadgetFinderCreateInfo createInfo = {
 		.executablePath = "C:\\Users\\Sam\\Desktop\\ntoskrnl.exe",
+		.sectionToSearch = ".text",
 		.pGadgetFilter = &createInfoGadgetFilter
 	};
 

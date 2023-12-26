@@ -34,6 +34,7 @@ public:
 
 	struct GadgetFinderCreateInfo {
 		const std::string& executablePath;
+		const std::string& sectionToSearch;
 		GadgetFilter* pGadgetFilter;
 	};
 

@@ -62,7 +62,7 @@ GadgetFinder::GadgetFinder(GadgetFinderCreateInfo* create_info) : m_CreateInfo(c
         IMAGE_SECTION_HEADER sectionHeader{};
         file.read(reinterpret_cast<char*>(&sectionHeader), sizeof(IMAGE_SECTION_HEADER));
 
-        if (_strcmpi(".text", reinterpret_cast<char*>(sectionHeader.Name)) == 0) {
+        if (_strcmpi(create_info->sectionToSearch.c_str(), reinterpret_cast<char*>(sectionHeader.Name)) == 0) {
             printf("[INFO] Found .TEXT section at [%x]\n", sectionHeader.VirtualAddress);
 
             auto sectionHeaderEntry = SectionHeaderEntry{

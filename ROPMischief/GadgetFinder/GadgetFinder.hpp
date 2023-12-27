@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <fstream>
 #include <vector>
+#include <map>
+#include <random>
 
 constexpr std::uint8_t RETURN_OPCODE = 0xC3;
 constexpr std::uint8_t CALL_OPCODE = 0xFF;
@@ -25,7 +27,7 @@ public:
 	* otherExcludeInstructions: a vector of instructions to exclude if gadgets contain them
 	*/
 	struct GadgetFilter {
-		size_t gadgetLength;
+		size_t maxGadgetLength;
 		size_t maxLookbackLength;
 		size_t maxNumOfGadgets;
 		bool excludeIndirectCalls;
@@ -48,7 +50,6 @@ public:
 	*/
 	struct Gadget {
 		std::uint64_t rva;
-		std::vector<std::uint8_t> data;
 		std::vector<cs_insn> instructions;
 	};
 
@@ -60,14 +61,17 @@ public:
 	GadgetFinder(GadgetFinderCreateInfo* create_info);
 
 	std::unique_ptr<GadgetInfo> AcquireGadgetInfo();
+	Gadget* AqquireGadgetFromMap(std::string asm_code);
+
 private:
 	struct SectionHeaderEntry {
 		IMAGE_SECTION_HEADER header;
-		std::vector<std::uint8_t> data;
+		std::vector<std::uint8_t> buffer;
 	};
 
 	bool GadgetPassesFilter(Gadget gadget, GadgetFilter filter);
-	std::vector<cs_insn> DissasembleBytes(csh capstone_handle, std::vector<uint8_t> bytes, uint64_t rva);
+	std::vector<cs_insn> DissasembleBytes(csh capstone_handle, uint8_t* bytes, size_t length, uint64_t rva);
 	GadgetFinderCreateInfo* m_CreateInfo = nullptr;
 	SectionHeaderEntry m_SectionEntry;
+	std::map<std::string, std::vector<GadgetFinder::Gadget>> m_GadgetMap;
 };

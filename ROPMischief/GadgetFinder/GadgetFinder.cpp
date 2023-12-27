@@ -67,14 +67,14 @@ GadgetFinder::GadgetFinder(GadgetFinderCreateInfo* create_info) : m_CreateInfo(c
 
             auto sectionHeaderEntry = SectionHeaderEntry{
                     .header = sectionHeader,
-                    .data = std::vector<std::uint8_t>(sectionHeader.Misc.VirtualSize) 
+                    .buffer = std::vector<std::uint8_t>(sectionHeader.Misc.VirtualSize) 
             };
 
             // go to beginning of section
             file.seekg(sectionHeader.PointerToRawData, std::ios::beg);
 
             // read section bytes into vector
-            file.read(reinterpret_cast<char*>(sectionHeaderEntry.data.data()), sectionHeader.Misc.VirtualSize);
+            file.read(reinterpret_cast<char*>(sectionHeaderEntry.buffer.data()), sectionHeader.Misc.VirtualSize);
 
             // save the data
             this->m_SectionEntry = sectionHeaderEntry;
@@ -84,20 +84,20 @@ GadgetFinder::GadgetFinder(GadgetFinderCreateInfo* create_info) : m_CreateInfo(c
         }
     }
 
-    if (m_SectionEntry.data.empty()) {
+    if (m_SectionEntry.buffer.empty()) {
         throw std::runtime_error("failed to find section data");
     }
 
     file.close();
 }
 
-std::vector<cs_insn> GadgetFinder::DissasembleBytes(csh capstone_handle, std::vector<uint8_t> bytes, uint64_t rva) {
+std::vector<cs_insn> GadgetFinder::DissasembleBytes(csh capstone_handle, uint8_t* bytes, size_t length, uint64_t rva) {
     std::vector<cs_insn> result;
     cs_insn* buff;
     size_t count = 0;
 
     // check for valid bytes to dissect
-    if (bytes.empty()) {
+    if (bytes == nullptr) {
         if (ANNOUNCE_FAILURE_MESSAGES) {
             printf("[FAIL] cannot disassemble invalid byte array\n");
         }
@@ -105,7 +105,7 @@ std::vector<cs_insn> GadgetFinder::DissasembleBytes(csh capstone_handle, std::ve
     }
 
     // dissasemble instructions into buff
-    count = cs_disasm(capstone_handle, bytes.data(), bytes.size(), rva, 0, &buff);
+    count = cs_disasm(capstone_handle, bytes, length, rva, 0, &buff);
     if (count == 0) {
         if (ANNOUNCE_FAILURE_MESSAGES) {
             printf("[FAIL] failed to disassemble bytes\n");
@@ -127,12 +127,12 @@ std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AcquireGadgetInfo() {
     std::unique_ptr<GadgetInfo> result = std::make_unique<GadgetInfo>();
 
     // check for valid instruction array
-    if (this->m_SectionEntry.data.empty()) {
+    if (this->m_SectionEntry.buffer.empty()) {
         throw std::runtime_error("no section data");
     }
 
     // check to see if max instructions is valid
-    if (this->m_CreateInfo->pGadgetFilter->gadgetLength <= 0) {
+    if (this->m_CreateInfo->pGadgetFilter->maxGadgetLength <= 0) {
         throw std::runtime_error("gadget length cannot be zero or less");
     }
 
@@ -160,57 +160,97 @@ std::unique_ptr<GadgetFinder::GadgetInfo> GadgetFinder::AcquireGadgetInfo() {
     // get details for instrucitons
     if (cs_option(capstoneEngineHandle, CS_OPT_DETAIL, CS_OPT_ON) != CS_ERR_OK) {
         cs_close(&capstoneEngineHandle);
-        throw std::runtime_error("failed to initialize Capstone engine(1)");
+        throw std::runtime_error("failed to initialize Capstone engine(2)");
     }
 
     // iterate over all bytes in the text section
-    for (size_t idx = 0; idx < this->m_SectionEntry.data.size(); ++idx) {
+    for (size_t idx = 0; idx < this->m_SectionEntry.buffer.size(); idx++) {
 
         // identify return opcodes
-        if (this->m_SectionEntry.data.at(idx) == RETURN_OPCODE 
-            && (this->m_CreateInfo->pGadgetFilter->maxNumOfGadgets == 0 
-            || (this->m_CreateInfo->pGadgetFilter->maxNumOfGadgets > 0
-            && result->unfilteredGadgets.size() < this->m_CreateInfo->pGadgetFilter->maxNumOfGadgets))) {
+        if (this->m_SectionEntry.buffer.at(idx) == RETURN_OPCODE) {
+            if (result->unfilteredGadgets.size() >= this->m_CreateInfo->pGadgetFilter->maxNumOfGadgets) {
+                break;
+            }
 
             // establish a lookback length in bytes
-            size_t lookbackLength = 0;
-            while (lookbackLength <= this->m_CreateInfo->pGadgetFilter->maxLookbackLength) {
-                size_t idxStart = idx - lookbackLength;
-                auto bytesToDissasemble = std::vector<uint8_t>(m_SectionEntry.data.begin() + idxStart,
-                    m_SectionEntry.data.begin() + idx + 1);
+            size_t lookbackBytes = 0;
+            while (lookbackBytes <= this->m_CreateInfo->pGadgetFilter->maxLookbackLength) {
+                uintptr_t rva = this->m_SectionEntry.header.VirtualAddress + idx - lookbackBytes + 1;
 
                 std::vector<cs_insn> dissassembledBytes = DissasembleBytes(
-                    capstoneEngineHandle,
-                    bytesToDissasemble,
-                    this->m_SectionEntry.header.VirtualAddress + idxStart);
+                capstoneEngineHandle,
+                    &*(m_SectionEntry.buffer.begin() + idx - lookbackBytes + 1),
+                    lookbackBytes,
+                    rva);
 
-                if (dissassembledBytes.size() == 0|| dissassembledBytes.size() <= this->m_CreateInfo->pGadgetFilter->gadgetLength) {
-                    lookbackLength++;
+                if (dissassembledBytes.size() == 0 || dissassembledBytes.at(dissassembledBytes.size() - 1).id != x86_insn::X86_INS_RET) {
+                    lookbackBytes++;
                     continue;
                 }
+                
+                if (dissassembledBytes.size() <= this->m_CreateInfo->pGadgetFilter->maxGadgetLength) {
+                    for (auto const& insn : dissassembledBytes) {
+                        if (insn.id == x86_insn::X86_INS_RET && &insn != &dissassembledBytes.back()) {
+                            lookbackBytes++;
+                            continue;
+                        }
+                    }
 
-                if (dissassembledBytes.at(dissassembledBytes.size() - 1).id != x86_insn::X86_INS_RET) {
+                    Gadget unfilteredGadget = {
+                        .rva = rva,
+                        .instructions = std::move(dissassembledBytes)
+                    };
+                    
+                    for (auto const& insn : unfilteredGadget.instructions) {
+                        std::string key;
+                        for (size_t i = 0; i < unfilteredGadget.instructions.size(); ++i) {
+                            key += unfilteredGadget.instructions.at(i).mnemonic;
+                            if (i + 1 != unfilteredGadget.instructions.size())
+                                key += " ";
+                            key += unfilteredGadget.instructions.at(i).op_str;
+                            if (i + 1 != unfilteredGadget.instructions.size())
+                                key += "; ";
+                        }
+
+                        if (auto entry = this->m_GadgetMap.find(key); entry != this->m_GadgetMap.end()) {
+                            entry->second.push_back(unfilteredGadget);
+                        }
+                        else {
+                            this->m_GadgetMap[key] = { unfilteredGadget };
+                        }
+                    }
+                    
+                    if (GadgetPassesFilter(unfilteredGadget, *this->m_CreateInfo->pGadgetFilter)) {
+                        result->filteredGadgets.push_back(unfilteredGadget);
+                    }
+
+                    result->unfilteredGadgets.push_back(std::move(unfilteredGadget));
+                    lookbackBytes++;
+                    continue;
+                }
+                else {
                     break;
                 }
-                
-                Gadget unfilteredGadget = {
-                    .rva = this->m_SectionEntry.header.VirtualAddress + idxStart,
-                     .data = bytesToDissasemble,
-                     .instructions = dissassembledBytes
-                };
-
-                if (GadgetPassesFilter(unfilteredGadget, *this->m_CreateInfo->pGadgetFilter)) {
-                    result->filteredGadgets.push_back(unfilteredGadget);
-                }
-
-                result->unfilteredGadgets.push_back(unfilteredGadget);
-                break;
             }
         }
     }
 
     cs_close(&capstoneEngineHandle);
     return result;
+}
+
+GadgetFinder::Gadget* GadgetFinder::AqquireGadgetFromMap(std::string asm_code) {
+    auto it = this->m_GadgetMap.find(asm_code);
+    if (it != this->m_GadgetMap.end())
+    {
+        std::vector<Gadget> out;
+        std::sample(it->second.begin(), it->second.end(), std::back_inserter(out), 1, std::mt19937{ std::random_device{}() });
+        return new Gadget(out[0]);
+    }
+    else
+    {
+        return nullptr;
+    }
 }
 
 bool GadgetFinder::GadgetPassesFilter(Gadget gadget, GadgetFilter gadgetFilter) {
@@ -253,10 +293,10 @@ bool GadgetFinder::GadgetPassesFilter(Gadget gadget, GadgetFilter gadgetFilter) 
     }
 
     
-    for (const cs_insn& insn : gadget.instructions) {
+    for (const auto& insn : gadget.instructions) {
         x86_insn insnID = static_cast<x86_insn>(insn.id);
 
-        for (const std::vector<x86_insn>& filter : gadgetFilter.otherExcludeInstructions) {
+        for (const auto& filter : gadgetFilter.otherExcludeInstructions) {
             size_t filterIdx = 0; // index to track the progress in the filter sequence
 
             // iterate over the instructions in the gadget
